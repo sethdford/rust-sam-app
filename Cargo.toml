@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "api-handler",
+    "event-processor",
+    "shared"
+]
+resolver = "2" 
