@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Rust SAM Application with enhanced security for financial services
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    Description: Environment name (dev, test, prod)
+    AllowedValues:
+      - dev
+      - test
+      - prod
+  
+  DynamoDBTableName:
+    Type: String
+    Default: Items
+    Description: Name of the DynamoDB table
+  
+  SQSQueueName:
+    Type: String
+    Default: ItemEvents
+    Description: Name of the SQS queue
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: provided.al2
+    Architectures:
+      - arm64
+    Tracing: Active
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        DYNAMODB_TABLE: !Ref ItemsTable
+        EVENT_QUEUE_URL: !Ref ItemEventsQueue
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        RUST_BACKTRACE: 1
+        RUST_LOG: info
+
+Resources:
+  # API Gateway with WAF protection
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","userAgent":"$context.identity.userAgent"}'
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+      EndpointConfiguration:
+        Type: REGIONAL
+      TracingEnabled: true
+      
+  # WAF Web ACL for API Gateway
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${AWS::StackName}-WebACL
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}-WebACL
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+        - Name: RateBasedRule
+          Priority: 2
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateBasedRule
+          Statement:
+            RateBasedStatement:
+              Limit: 1000
+              AggregateKeyType: IP
+  
+  # WAF Association with API Gateway
+  WebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${ApiGateway}/stages/Prod
+      WebACLArn: !GetAtt WebACL.Arn
+  
+  # Cognito User Pool for Authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      MfaConfiguration: OFF
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      UserPoolAddOns:
+        AdvancedSecurityMode: ENFORCED
+  
+  # Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-UserPoolClient
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+  
+  # API Handler Lambda Function
+  ApiHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: api-handler/
+      Handler: bootstrap
+      Description: API Handler for CRUD operations
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ItemsTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ItemEventsQueue.QueueName
+        - CloudWatchPutMetricPolicy: {}
+        - XRayPutTracePolicy: {}
+      Events:
+        GetItems:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /items
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetItem:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /items/{id}
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        CreateItem:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /items
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        DeleteItem:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /items/{id}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+  
+  # Event Processor Lambda Function
+  EventProcessor:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: event-processor/
+      Handler: bootstrap
+      Description: Processes events from SQS
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ItemsTable
+        - CloudWatchPutMetricPolicy: {}
+        - XRayPutTracePolicy: {}
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ItemEventsQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 60
+            Enabled: true
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+  
+  # DynamoDB Table with encryption and point-in-time recovery
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${DynamoDBTableName}-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # SQS Queue with encryption and dead-letter queue
+  ItemEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${SQSQueueName}-${Environment}
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ItemEventsDLQ.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # Dead Letter Queue for failed event processing
+  ItemEventsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${SQSQueueName}-DLQ-${Environment}
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  
+  # CloudWatch Alarm for DLQ messages
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-DLQ-Alarm
+      AlarmDescription: Alarm when messages are sent to the DLQ
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ItemEventsDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+  
+  # SNS Topic for alerts
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-Alerts
+      KmsMasterKeyId: alias/aws/sns
+  
+  # CloudWatch Log Group for API Gateway Access Logs
+  ApiGatewayAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${AWS::StackName}-AccessLogs
+      RetentionInDays: 90
+  
+  # VPC for Lambda functions
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+  
+  # Private Subnets for Lambda functions
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet1
+  
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet2
+  
+  # Security Group for Lambda functions
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-LambdaSG
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/
+  
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+  
+  ItemsTableName:
+    Description: DynamoDB table name
+    Value: !Ref ItemsTable
+  
+  ItemEventsQueueUrl:
+    Description: SQS queue URL
+    Value: !Ref ItemEventsQueue
+  
+  ItemEventsDLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref ItemEventsDLQ 

@@ -1,0 +1,36 @@
+{
+  "version": "2.0",
+  "routeKey": "DELETE /items/{id}",
+  "rawPath": "/items/test-item-id",
+  "rawQueryString": "",
+  "headers": {
+    "accept": "*/*",
+    "content-type": "application/json",
+    "host": "localhost:3000",
+    "user-agent": "curl/7.79.1",
+    "x-forwarded-proto": "http",
+    "x-forwarded-port": "3000"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "1234567890",
+    "domainName": "localhost:3000",
+    "domainPrefix": "localhost",
+    "http": {
+      "method": "DELETE",
+      "path": "/items/test-item-id",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "curl/7.79.1"
+    },
+    "requestId": "request-id",
+    "routeKey": "DELETE /items/{id}",
+    "stage": "$default",
+    "time": "12/Mar/2023:19:03:58 +0000",
+    "timeEpoch": 1678644238
+  },
+  "pathParameters": {
+    "id": "test-item-id"
+  },
+  "isBase64Encoded": false
+} 
