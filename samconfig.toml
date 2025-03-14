@@ -2,10 +2,10 @@ version = 0.1
 [default]
 [default.deploy]
 [default.deploy.parameters]
-stack_name = "rust-sam-app"
-s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket"
-s3_prefix = "rust-sam-app"
+stack_name = "deep-risk-model"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-XXXXXXXXXXXX"
+s3_prefix = "deep-risk-model"
 region = "us-east-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "Environment=dev" 
+image_repositories = ["DeepRiskModelFunction=XXXXXXXXXXXX.dkr.ecr.us-east-1.amazonaws.com/deep-risk-model"] 
